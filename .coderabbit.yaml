@@ -1,0 +1,367 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit configuration — Showroom Manager (GST billing & inventory PWA)
+# Docs: https://docs.coderabbit.ai/reference/configuration
+#
+# Repo reality this file is tuned for (all verified in-tree):
+#   • React 19 + TypeScript (strict) + Vite 7 + Tailwind v4, offline-first PWA
+#   • Data layer: Dexie/IndexedDB, per-company database, versioned schema v1..v4
+#   • Money/GST maths in src/lib/calc.ts, all writes in src/lib/repo.ts
+#   • Optional cloud sync over Firebase REST (no SDK)
+#   • No ESLint / Prettier / Biome / Jest / Vitest config in the repo.
+#     The only test harness is the custom smoke runner: `npm run verify`
+#     (= `tsc -b` + `node smoke/preflight.mjs` + esbuild + jsdom smoke run).
+
+language: "en-US"
+early_access: false
+enable_free_tier: true
+
+tone_instructions: >-
+  Be direct and technical. No praise, no restating the diff, no filler. Report a
+  finding only when you can justify it from the code in front of you; stay silent
+  when you are unsure. This is an offline-first app that handles money, GST and
+  a shop's stock, so correctness of rupee/paise arithmetic, CGST/SGST/IGST
+  splits, stock movement and local data durability outranks style every time.
+  Comments, identifiers' intent and user-facing strings are deliberately
+  Hinglish/Hindi for the shop owner — never rewrite them into English and never
+  raise them as a language, spelling or grammar issue. Do not flag pre-existing
+  problems in code the PR merely moved or reformatted.
+
+reviews:
+  # assertive: the point of this config is to surface real defects, not vibes.
+  profile: "assertive"
+  # Report findings but never block the merge — the maintainer decides.
+  request_changes_workflow: false
+
+  high_level_summary: true
+  review_status: true
+  review_details: true
+  commit_status: true
+  # A review that silently did not run (rate limit / internal error) must not
+  # post a green status and look like a clean review.
+  fail_commit_status: true
+
+  collapse_walkthrough: true
+  changed_files_summary: true
+  sequence_diagrams: false
+  estimate_code_review_effort: false
+
+  assess_linked_issues: false
+  related_issues: true
+  related_prs: true
+
+  poem: false
+  suggested_labels: false
+  auto_apply_labels: false
+  suggested_reviewers: false
+  auto_assign_reviewers: false
+  labeling_instructions: []
+
+  abort_on_close: true
+  disable_cache: false
+
+  # Build output and lockfiles are noise: never review them.
+  path_filters:
+    - "!dist/**"
+    - "!docs/**"
+    - "!preview-build/**"
+    - "!package-lock.json"
+    - "!tsconfig.tsbuildinfo"
+    - "!**/*.tsbuildinfo"
+    - "!smoke/.build/**"
+    - "!public/**"
+    - "!**/*.png"
+    - "!**/*.jpg"
+    - "!**/*.jpeg"
+    - "!**/*.webp"
+    - "!**/*.webmanifest"
+    - "!**/*.pdf"
+
+  path_instructions:
+    # ---------------- GST / money maths ----------------
+    - path: "src/lib/calc.ts"
+      instructions: |
+        This file is the GST engine. Hold it to these invariants:
+        - Every monetary intermediate must go through round2() (or round0() for
+          round-off) from src/lib/format.ts. Flag raw float accumulation such as
+          a += b on money, and any Math.round/Math.floor/toFixed used instead.
+        - computeTotals(): the bill-level discount is distributed over lines in
+          integer paise with a largest-remainder pass. The sum of allocated
+          paise must equal discountPaise exactly — a rewrite that leaves a
+          paisa unallocated, allocates more than discountPaise, or changes the
+          deterministic tie-break (fraction desc, then index asc) is a bug.
+        - cgst = round2(tax / 2) and sgst = round2(tax - cgst) exists precisely
+          so cgst + sgst === tax to the paisa. Any change must preserve that
+          identity; flag a version that rounds both halves independently.
+        - interState (placeOfSupply !== shopStateCode, default '08') must put
+          the whole tax in IGST and zero out CGST/SGST; intra-state must be the
+          mirror image. A bill can never show both IGST and CGST/SGST.
+        - Documents with docMeta().noTax (Bill of Supply etc.) must force
+          gstPercent to 0 regardless of what the line carries.
+        - Round-off applies only to the grand total, never to a line, and
+          roundOff must stay equal to grandTotal - beforeRound.
+        - hsnSummary() indexes t.lines[i] positionally against inv.items, so
+          lines must stay index-aligned with inv.items. Flag any sort/filter/map
+          that breaks that alignment, and check the HSN + gstPercent group key.
+        - payStatus() treats due <= 0.5 as PAID on purpose (paisa tolerance).
+          Flag a change to that threshold as a behaviour change, not a cleanup.
+        - profit uses costPrice * qty against taxableNet. Changing either side
+          changes Reports numbers — call that out.
+
+    - path: "src/lib/format.ts"
+      instructions: |
+        round2()/round0() are the only sanctioned rounding for money, and both
+        coerce non-finite input to 0 — that guard is load-bearing because NaN
+        otherwise poisons an entire invoice. Do not "simplify" it away. Check
+        currency/number formatting for Indian digit grouping (lakh/crore) and
+        for negative amounts.
+
+    # ---------------- data layer ----------------
+    - path: "src/lib/repo.ts"
+      instructions: |
+        Every multi-table mutation must run inside a single Dexie
+        db.transaction('rw', ...tables) with all touched tables listed — flag a
+        write that touches a table missing from that list, and flag a
+        read-modify-write moved outside the transaction. Also verify:
+        - Optimistic concurrency: existing.updatedAt !== inv.updatedAt must
+          still throw the stale error, and nextStamp() must produce a strictly
+          increasing stamp (it feeds last-write-wins sync).
+        - requireUnlocked() is called before the write (and again inside the
+          transaction where the original does it).
+        - Stock is derived: reconcileInventory()/adjustStock() own stockQty.
+          Flag any code that writes stockQty directly, and check that cancel /
+          restore / delete / credit-note paths return stock symmetrically with
+          the path that deducted it.
+        - Bill numbers are unique per docType, allocated only for new
+          documents; a change that can duplicate or reuse a number is a bug.
+        - deleteRecord()/markDeleted() must write a tombstone — deletes that
+          skip it break cloud sync (the row resurrects).
+        - exportBackup()/importBackup()/wipeAllData() must cover every table in
+          SYNC_TABLES plus tombstones and users; flag a new table that is not
+          added to the backup path.
+
+    - path: "src/lib/db.ts"
+      instructions: |
+        Dexie schema history is append-only. Never accept an edit to an already
+        released version()'s stores string; a schema change needs a NEW
+        this.version(n) (with .upgrade() when existing rows need migrating).
+        The database name is per-company (dbNameFor(activeCompanyId())) — flag
+        anything that assumes a single global database. New tables must be added
+        to the Dexie hooks loop and to SYNC_TABLES, and must be considered in
+        seedDatabase() defaults.
+
+    - path: "src/lib/inventory.ts"
+      instructions: |
+        Stock reconciliation must be idempotent — running it twice must not move
+        stock twice. Check that cancelled/credit-note documents are excluded
+        consistently and that fractional/roundStock quantities are handled.
+
+    - path: "src/lib/sync.ts"
+      instructions: |
+        Cloud sync must never lose local data. Verify: last-write-wins is by
+        updatedAt/createdAt stamp only; tombstones always beat an older remote
+        live row; syncId identity is preserved (never reassigned on merge);
+        syncNow() stays de-duplicated through pendingSyncs so concurrent calls
+        cannot interleave two merges; a failed merge leaves the local database
+        intact; and mergeSnapshot() is safe to re-run (idempotent).
+
+    - path: "src/lib/syncIdentity.ts"
+      instructions: |
+        naturalKey()/newSyncId() feed cross-device merge. A change to key
+        derivation silently orphans already-synced rows — flag it as a
+        migration-level breaking change, not a refactor.
+
+    # ---------------- security ----------------
+    - path: "src/lib/auth.ts"
+      instructions: |
+        Staff access control. Enforce: PBKDF2-SHA256 iterations must never drop
+        below ITERATIONS (210_000) and the stored-format check must keep
+        rejecting weaker counts; PIN hash comparison must stay constant-time
+        (no early-return string ===); the session must stay bound to pinHash so
+        a PIN change invalidates existing sessions; login/recovery lockouts and
+        loginFailures/lockedUntil must not be bypassable; sha256: and fnv:
+        formats are migration-only paths that must migrate only AFTER a
+        successful verify. Remember the file's own contract: browser storage is
+        not an authorization boundary — never describe it as one.
+
+    - path: "src/lib/cloud.ts"
+      instructions: |
+        Firebase over REST, deliberately SDK-free to keep the bundle small —
+        flag a suggestion to pull in the Firebase SDK as against project intent.
+        apiKey/projectId are user-supplied and stored locally by design; that is
+        not a leaked secret, but a hard-coded key, token, refresh token or
+        project id committed in source IS. Check that tokens are never logged or
+        put in a URL, that refresh failures sign the user out cleanly, and that
+        a network failure degrades to offline instead of corrupting local data.
+
+    - path: "src/lib/store.ts"
+      instructions: |
+        The in-memory fallback must keep shadowing a persistent value whose
+        write or removal failed — that precedence is what stops a blocked-storage
+        browser from resurrecting an old session. Flag any "simplification" that
+        drops the removal marker or reads through to storage first.
+
+    # ---------------- UI ----------------
+    - path: "src/screens/**"
+      instructions: |
+        React 19 function components, offline-first, touch-first for a phone in
+        a shop. Check: Dexie reads go through useLiveQuery (a bare await inside
+        render or a stale useEffect snapshot is a bug); list keys are stable;
+        long lists and barcode-scan input stay responsive; every write awaits the
+        repo function and surfaces its error to the user in Hindi instead of
+        throwing; no direct db.* mutation bypassing src/lib/repo.ts; no new
+        dependency for something src/components/ui.tsx already provides. Keep all
+        user-facing text Hindi/Hinglish.
+
+    - path: "src/components/**"
+      instructions: |
+        Shared presentational components. Keep them free of Dexie/repo imports
+        unless they already have one; keep props narrowly typed (no any); keep
+        the existing controlled/uncontrolled pattern. InvoicePaper and
+        PrintPortal feed both A4 and 80mm thermal print output — a layout change
+        must be checked against both, and against the WhatsApp image share path
+        (html2canvas-pro).
+
+    - path: "src/App.tsx"
+      instructions: |
+        Root shell: routing, auth gate, cloud/auto-sync wiring, boot failures.
+        Check that an unauthenticated user cannot reach a data screen, that a
+        boot/storage failure lands on the recovery UI rather than a white
+        screen, and that sync is not re-triggered on every render.
+
+    - path: "src/lib/env.ts"
+      instructions: |
+        Embedded/iframe and blocked-IndexedDB detection. canUseStorage() must
+        keep its timeout fallback (it resolves rather than hanging in odd
+        browsers) and its onblocked = true behaviour; changing those changes
+        which users get locked out of the app.
+
+    # ---------------- build & harness ----------------
+    - path: "vite.config.ts"
+      instructions: |
+        base must stay relative ('./') — the same build is served from GitHub
+        Pages sub-paths and copied into the Android app's assets. server/preview
+        keep host 0.0.0.0 and allowedHosts true for the sandboxed preview. A new
+        plugin or chunk change must not break the PWA service worker or the
+        single-file build (vite.config.singlefile.ts).
+
+    - path: "package.json"
+      instructions: |
+        No test framework exists by design. Do not suggest Jest/Vitest/ESLint/
+        Prettier scaffolding as a fix; the harness is the smoke runner. `verify`
+        must keep meaning "tsc -b then npm run smoke". Flag a new runtime
+        dependency for a job an existing one already does (bundle size matters —
+        this ships as a phone PWA), and flag a change to `engines` (node >= 20).
+
+    - path: "smoke/**"
+      instructions: |
+        This is the project's only test harness: a hand-rolled esbuild + jsdom +
+        fake-indexeddb runner, NOT Jest/Vitest. Keep the check(name, ok, info)
+        pattern and the plain console output, keep `close()` tolerance for money
+        assertions, and remember globalThis.indexedDB must be defined before
+        Dexie's module evaluation. A new or changed behaviour in src/lib needs a
+        matching check() here — say so explicitly when it is missing.
+
+    - path: "README.md"
+      instructions: |
+        The README is the product manual, written in Hindi/Hinglish with
+        deliberate markdown formatting. Only flag broken markdown, broken
+        commands, or a documented feature that no longer matches the code —
+        never the language.
+
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    drafts: false
+    ignore_title_keywords:
+      - "WIP"
+      - "DO NOT MERGE"
+      - "chore(deps)"
+    labels: []
+    base_branches:
+      - main
+
+  # Auto-generated docstrings/unit tests would be English-only and would fight
+  # the Hinglish house style. Off by default; enable per PR if ever wanted.
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+
+  pre_merge_checks:
+    custom_checks:
+      - name: "Money & GST changes carry a smoke check"
+        mode: warning
+        instructions: |
+          If this PR changes src/lib/calc.ts, src/lib/format.ts,
+          src/lib/inventory.ts or the money/stock paths in src/lib/repo.ts,
+          confirm the PR also adds or updates a matching check() in
+          smoke/regressions.ts or smoke/run.tsx covering the new numbers
+          (totals, CGST/SGST/IGST split, discount allocation, round-off, stock
+          after cancel/credit-note). If it does not, report which exact scenario
+          is uncovered. If the change is provably number-neutral, accept it and
+          say why.
+      - name: "Local data durability"
+        mode: warning
+        instructions: |
+          If this PR touches src/lib/db.ts, src/lib/sync.ts,
+          src/lib/syncIdentity.ts or src/lib/types.ts, verify it does not break
+          data a shop already has on its phone: schema changes go through a new
+          Dexie version (never an edit to a released stores string), deletes
+          still write tombstones, syncId/naturalKey derivation is unchanged, and
+          exportBackup()/importBackup() still cover the affected tables. Report
+          anything that would strand or duplicate existing local data after an
+          app update.
+
+  tools:
+    # No ESLint / Prettier / Biome config exists in this repo; running them
+    # would invent a style policy the project does not have.
+    eslint:
+      enabled: false
+    prettier:
+      enabled: false
+    biome:
+      enabled: false
+    # Comments and UI text are Hinglish/Hindi on purpose — grammar linting on
+    # them produces pure noise.
+    languagetool:
+      enabled: false
+    # No shell/infra/workflow surface to lint.
+    shellcheck:
+      enabled: false
+    checkov:
+      enabled: false
+    actionlint:
+      enabled: false
+    yamllint:
+      enabled: false
+
+    # Real value here:
+    #   gitleaks   — cloud config/tokens must never be committed
+    #   semgrep    — crypto, storage and merge logic
+    #   markdownlint — the README is the product manual
+    #   github-checks — surface `npm run verify` results once CI exists
+    gitleaks:
+      enabled: true
+    semgrep:
+      enabled: true
+    markdownlint:
+      enabled: true
+    github-checks:
+      enabled: true
+
+chat:
+  # Lets the maintainer ask follow-ups and request fixes in the PR thread
+  # ("@coderabbitai fix this", "@coderabbitai resolve").
+  auto_reply: true
+
+knowledge_base:
+  learnings:
+    scope: auto
+  issues:
+    scope: auto
+  pull_requests:
+    scope: auto
+  web_search:
+    enabled: true
