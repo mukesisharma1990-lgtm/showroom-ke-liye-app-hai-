@@ -16,16 +16,12 @@ language: "en-US"
 early_access: false
 enable_free_tier: true
 
+# NOTE: schema caps this at 250 characters. The long-form policy lives in the
+# catch-all path_instructions entry below, which has no such cap.
 tone_instructions: >-
-  Be direct and technical. No praise, no restating the diff, no filler. Report a
-  finding only when you can justify it from the code in front of you; stay silent
-  when you are unsure. This is an offline-first app that handles money, GST and
-  a shop's stock, so correctness of rupee/paise arithmetic, CGST/SGST/IGST
-  splits, stock movement and local data durability outranks style every time.
-  Comments, identifiers' intent and user-facing strings are deliberately
-  Hinglish/Hindi for the shop owner — never rewrite them into English and never
-  raise them as a language, spelling or grammar issue. Do not flag pre-existing
-  problems in code the PR merely moved or reformatted.
+  Be direct and technical. No praise, no restating the diff. Report only findings
+  you can justify from the code. Money, GST and stock correctness outranks style.
+  Never rewrite Hindi/Hinglish comments or UI strings into English.
 
 reviews:
   # assertive: the point of this config is to surface real defects, not vibes.
@@ -78,6 +74,30 @@ reviews:
     - "!**/*.pdf"
 
   path_instructions:
+    # ---------------- repo-wide policy ----------------
+    - path: "**"
+      instructions: |
+        General policy that applies to every file in this repo:
+        - Report a finding only when you can justify it from the code in front of
+          you; stay silent when you are unsure. No praise, no restating the diff,
+          no filler, no speculative "you might also want to".
+        - This is an offline-first app that handles money, GST and a shop's live
+          stock. Correctness of rupee/paise arithmetic, CGST/SGST/IGST splits,
+          stock movement and local data durability outranks style every time.
+        - Comments, identifiers' intent and user-facing strings are deliberately
+          Hinglish/Hindi, written for a shop owner reading their phone. Never
+          rewrite them into English, never flag them as a language, spelling or
+          grammar issue, and never propose "translating for consistency".
+        - Do not flag pre-existing problems in code this PR merely moved,
+          re-indented or reformatted without a logic change.
+        - Do not propose adding Jest/Vitest/ESLint/Prettier/Biome, or pulling in
+          the Firebase SDK. The project deliberately has none of them: the test
+          harness is the smoke runner (smoke/**, `npm run verify`) and the cloud
+          client is deliberately REST to keep the bundle small. Point defects at
+          the existing patterns instead of at new scaffolding.
+        - This build ships as a phone PWA and as a single HTML file, so bundle
+          size is a correctness concern, not a nitpick.
+
     # ---------------- GST / money maths ----------------
     - path: "src/lib/calc.ts"
       instructions: |
